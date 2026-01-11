@@ -1,0 +1,26 @@
+data:
+  raw_path: "data/raw/sales_data.csv"
+  processed_path: "data/processed/sales_processed.csv"
+  train_path: "data/processed/train.csv"
+  test_path: "data/processed/test.csv"
+
+model:
+  forecast_horizon: 30
+  test_size: 0.2
+  random_state: 42
+  target_column: "Sales_Amount"
+  date_column: "Sale_Date"
+  
+features:
+  lag_features: [1, 7, 14, 30]
+  rolling_windows: [7, 14, 30]
+  categorical_features: ["Region", "Product_Category", "Sales_Rep", "Customer_Type"]
+  
+mlflow:
+  tracking_uri: "http://localhost:5000"
+  experiment_name: "sales_forecasting"
+  
+api:
+  host: "0.0.0.0"
+  port: 5001
+  debug: false
