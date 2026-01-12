@@ -1,234 +1,162 @@
+import xgboost as xgb
 import mlflow
-import mlflow.sklearn
 import mlflow.xgboost
-import pandas as pd
-import numpy as np
 from sklearn.model_selection import TimeSeriesSplit, train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-import xgboost as xgb
-from prophet import Prophet
-import warnings
-warnings.filterwarnings('ignore')
+import numpy as np
+import pandas as pd
 import joblib
-import json
+from datetime import datetime
+import os
 
-class ModelTrainer:
-    def __init__(self, config):
-        self.config = config
-        self.models = {}
-        self.metrics = {}
+class SalesForecastModel:
+    def __init__(self, experiment_name="sales_forecast"):
+        self.model = None
+        self.scaler = None
+        self.experiment_name = experiment_name
+        self.setup_mlflow()
         
-    def prepare_data(self, df):
-        """Preparing data for time series forecasting"""
-        target_col = self.config['model']['target_column']
-        date_col = self.config['model']['date_column']
+    def setup_mlflow(self):
+        """Setup MLflow tracking"""
+        mlflow.set_experiment(self.experiment_name)
         
-        # Separating features and target
-        X = df.drop(columns=[target_col, date_col], errors='ignore')
-        y = df[target_col]
+        # Creating local MLflow tracking directory
+        if not os.path.exists("mlflow"):
+            os.makedirs("mlflow")
         
-        # For time series, we need to maintain temporal order
-        split_idx = int(len(df) * (1 - self.config['model']['test_size']))
-        
-        X_train = X.iloc[:split_idx]
-        X_test = X.iloc[split_idx:]
-        y_train = y.iloc[:split_idx]
-        y_test = y.iloc[split_idx:]
-        
-        print(f"Training set: {X_train.shape}")
-        print(f"Test set: {X_test.shape}")
-        
-        return X_train, X_test, y_train, y_test
+        mlflow.set_tracking_uri("file:///mlflow")
     
-    def train_xgboost(self, X_train, y_train, X_test, y_test, experiment_name="xgboost"):
-        """Train XGBoost model with MLflow tracking"""
+    def prepare_data(self, df, features, target='Sales_Amount', test_size=0.2):
+        """Prepare train-test split for time series"""
+        # Time-based split (important for time series)
+        split_idx = int(len(df) * (1 - test_size))
         
-        with mlflow.start_run(run_name=f"xgboost_{experiment_name}"):
-            # Log parameters
+        X = df[features].values
+        y = df[target].values
+        
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
+        
+        return X_train, X_test, y_train, y_test, split_idx
+    
+    def train_model(self, X_train, y_train, X_test, y_test, params=None):
+        """Train XGBoost model with MLflow tracking"""
+        if params is None:
             params = {
-                'n_estimators': 100,
+                'n_estimators': 300,
                 'max_depth': 6,
-                'learning_rate': 0.1,
+                'learning_rate': 0.05,
                 'subsample': 0.8,
                 'colsample_bytree': 0.8,
-                'random_state': self.config['model']['random_state']
+                'random_state': 42,
+                'n_jobs': -1
             }
-            
+        
+        with mlflow.start_run(run_name=f"xgboost_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+            # Log parameters
             mlflow.log_params(params)
             
             # Training model
-            model = xgb.XGBRegressor(**params)
-            model.fit(X_train, y_train)
+            self.model = xgb.XGBRegressor(**params)
+            self.model.fit(X_train, y_train,
+                          eval_set=[(X_test, y_test)],
+                          verbose=False)
             
             # Making predictions
-            y_pred_train = model.predict(X_train)
-            y_pred_test = model.predict(X_test)
+            y_pred = self.model.predict(X_test)
             
             # Calculating metrics
-            metrics = self._calculate_metrics(y_train, y_pred_train, y_test, y_pred_test)
+            mae = mean_absolute_error(y_test, y_pred)
+            mse = mean_squared_error(y_test, y_pred)
+            rmse = np.sqrt(mse)
+            r2 = r2_score(y_test, y_pred)
             
             # Log metrics
-            for metric_name, metric_value in metrics.items():
-                mlflow.log_metric(metric_name, metric_value)
+            mlflow.log_metric("MAE", mae)
+            mlflow.log_metric("MSE", mse)
+            mlflow.log_metric("RMSE", rmse)
+            mlflow.log_metric("R2", r2)
             
             # Log model
-            mlflow.xgboost.log_model(model, "model")
+            mlflow.xgboost.log_model(self.model, "xgboost_model")
             
-            # Saving feature importance
+            # Log feature importance
             feature_importance = pd.DataFrame({
-                'feature': X_train.columns,
-                'importance': model.feature_importances_
+                'feature': range(X_train.shape[1]),
+                'importance': self.model.feature_importances_
             }).sort_values('importance', ascending=False)
             
-            # Log feature importance as artifact
-            temp_path = "temp_feature_importance.csv"
-            feature_importance.to_csv(temp_path, index=False)
-            mlflow.log_artifact(temp_path)
+            mlflow.log_text(feature_importance.to_csv(), "feature_importance.csv")
             
-            self.models['xgboost'] = model
-            self.metrics['xgboost'] = metrics
+            print(f"Model trained successfully!")
+            print(f"MAE: {mae:.2f}, RMSE: {rmse:.2f}, R²: {r2:.4f}")
             
-            print(f"XGBoost training complete. Test RMSE: {metrics['test_rmse']:.2f}")
-            
-            return model, metrics
+            return self.model, {"MAE": mae, "RMSE": rmse, "R2": r2}
     
-    def train_prophet(self, df, experiment_name="prophet"):
-        """Train Facebook Prophet model"""
+    def cross_validate(self, X, y, params=None, n_splits=5):
+        """Perform time series cross-validation"""
+        tscv = TimeSeriesSplit(n_splits=n_splits)
+        cv_scores = []
         
-        with mlflow.start_run(run_name=f"prophet_{experiment_name}"):
-            # Preparing data for Prophet
-            prophet_df = df[[self.config['model']['date_column'], 
-                           self.config['model']['target_column']]].copy()
-            prophet_df.columns = ['ds', 'y']
+        for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
+            print(f"\nFold {fold + 1}/{n_splits}")
             
-            # Splitting data
-            split_idx = int(len(prophet_df) * (1 - self.config['model']['test_size']))
-            train_df = prophet_df.iloc[:split_idx]
-            test_df = prophet_df.iloc[split_idx:]
+            X_train, X_val = X[train_idx], X[val_idx]
+            y_train, y_val = y[train_idx], y[val_idx]
             
-            # Creating and training model
-            model = Prophet(
-                yearly_seasonality=True,
-                weekly_seasonality=True,
-                daily_seasonality=False,
-                seasonality_mode='multiplicative'
-            )
+            model = xgb.XGBRegressor(**(params or {}))
+            model.fit(X_train, y_train, verbose=False)
             
-            # Adding additional regressors if available
-            if 'Region' in df.columns:
-                model.add_regressor('Region')
-            if 'Product_Category' in df.columns:
-                model.add_regressor('Product_Category')
+            y_pred = model.predict(X_val)
+            rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+            cv_scores.append(rmse)
             
-            model.fit(train_df)
-            
-            # Making predictions
-            future = model.make_future_dataframe(periods=len(test_df))
-            forecast = model.predict(future)
-            
-            # Calculating metrics
-            y_true = test_df['y'].values
-            y_pred = forecast.iloc[split_idx:]['yhat'].values
-            
-            metrics = {
-                'test_mae': mean_absolute_error(y_true, y_pred),
-                'test_rmse': np.sqrt(mean_squared_error(y_true, y_pred)),
-                'test_r2': r2_score(y_true, y_pred)
-            }
-            
-            # Log metrics
-            for metric_name, metric_value in metrics.items():
-                mlflow.log_metric(metric_name, metric_value)
-            
-            # Log model
-            mlflow.prophet.log_model(model, "model")
-            
-            self.models['prophet'] = model
-            self.metrics['prophet'] = metrics
-            
-            print(f"Prophet training complete. Test RMSE: {metrics['test_rmse']:.2f}")
-            
-            return model, metrics
+            print(f"Validation RMSE: {rmse:.2f}")
+        
+        print(f"\nCross-validation RMSE: {np.mean(cv_scores):.2f} (±{np.std(cv_scores):.2f})")
+        return cv_scores
     
-    def train_ensemble(self, X_train, y_train, X_test, y_test):
-        """Train ensemble of models"""
-        # Training multiple models
-        xgb_model, xgb_metrics = self.train_xgboost(X_train, y_train, X_test, y_test)
-        
-       
-        
-        return xgb_model, xgb_metrics
+    def save_model(self, path="models/xgboost_model.pkl"):
+        """Save trained model"""
+        joblib.dump(self.model, path)
+        print(f"Model saved to {path}")
     
-    def _calculate_metrics(self, y_train, y_pred_train, y_test, y_pred_test):
-        """Calculating performance metrics"""
-        metrics = {
-            'train_mae': mean_absolute_error(y_train, y_pred_train),
-            'train_rmse': np.sqrt(mean_squared_error(y_train, y_pred_train)),
-            'train_r2': r2_score(y_train, y_pred_train),
-            'test_mae': mean_absolute_error(y_test, y_pred_test),
-            'test_rmse': np.sqrt(mean_squared_error(y_test, y_pred_test)),
-            'test_r2': r2_score(y_test, y_pred_test)
-        }
-        return metrics
+    def load_model(self, path="models/xgboost_model.pkl"):
+        """Load trained model"""
+        self.model = joblib.load(path)
+        print(f"Model loaded from {path}")
+        return self.model
     
-    def save_model(self, model, model_name, path=None):
-        """Saving trained model"""
-        if path is None:
-            path = f"data/models/{model_name}.pkl"
+    def predict_future(self, df, features, future_days=30):
+        """Generate future forecasts"""
+        # Use last known data point
+        last_data = df[features].iloc[-1:].values
         
-        joblib.dump(model, path)
-        print(f"Model saved to: {path}")
+        predictions = []
+        for i in range(future_days):
+            # Making prediction
+            pred = self.model.predict(last_data)[0]
+            predictions.append(pred)
+            
+            # Updating features for next prediction (simplified)
+            
+            if i < len(predictions) - 1:
+                last_data[0, 0] = predictions[-2] if i > 0 else pred
         
-        # Also saving metrics
-        metrics_path = f"data/models/{model_name}_metrics.json"
-        with open(metrics_path, 'w') as f:
-            json.dump(self.metrics.get(model_name, {}), f)
-        
-        return path
+        return predictions
     
-    def hyperparameter_tuning(self, X_train, y_train):
-        """Perform hyperparameter tuning with MLflow tracking"""
-        import optuna
+    def feature_importance_analysis(self, feature_names):
+        """Analyze and display feature importance"""
+        if self.model is None:
+            raise ValueError("Model not trained yet")
         
-        def objective(trial):
-            with mlflow.start_run(nested=True):
-                params = {
-                    'n_estimators': trial.suggest_int('n_estimators', 50, 500),
-                    'max_depth': trial.suggest_int('max_depth', 3, 10),
-                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                    'subsample': trial.suggest_float('subsample', 0.5, 1.0),
-                    'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-                    'gamma': trial.suggest_float('gamma', 0, 5),
-                    'reg_alpha': trial.suggest_float('reg_alpha', 0, 5),
-                    'reg_lambda': trial.suggest_float('reg_lambda', 0, 5)
-                }
-                
-                mlflow.log_params(params)
-                
-                model = xgb.XGBRegressor(**params, random_state=self.config['model']['random_state'])
-                
-                # Use time series cross-validation
-                tscv = TimeSeriesSplit(n_splits=5)
-                cv_scores = []
-                
-                for train_idx, val_idx in tscv.split(X_train):
-                    X_train_cv, X_val_cv = X_train.iloc[train_idx], X_train.iloc[val_idx]
-                    y_train_cv, y_val_cv = y_train.iloc[train_idx], y_train.iloc[val_idx]
-                    
-                    model.fit(X_train_cv, y_train_cv)
-                    y_pred = model.predict(X_val_cv)
-                    cv_scores.append(np.sqrt(mean_squared_error(y_val_cv, y_pred)))
-                
-                avg_rmse = np.mean(cv_scores)
-                mlflow.log_metric('cv_rmse', avg_rmse)
-                
-                return avg_rmse
+        importance = self.model.feature_importances_
+        feat_imp = pd.DataFrame({
+            'feature': feature_names,
+            'importance': importance
+        }).sort_values('importance', ascending=False)
         
-        # Create study
-        study = optuna.create_study(direction='minimize')
-        study.optimize(objective, n_trials=50)
+        print("\nTop 10 Most Important Features:")
+        print(feat_imp.head(10).to_string(index=False))
         
-        print(f"Best trial: {study.best_trial.params}")
-        print(f"Best CV RMSE: {study.best_trial.value}")
-        
-        return study.best_params
+        return feat_imp
