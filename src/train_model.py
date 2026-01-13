@@ -17,8 +17,8 @@ def main():
     # Loading and preprocessing data
     print("\n📊 Loading and preprocessing data...")
     df_clean, features = preprocessor.full_pipeline(
-        "data/sales_data.csv",
-        target_product=1052  # Focusing on a specific product
+        "sales_data.csv",
+        target_product=1055 # Focusing on a specific product
     )
     
     print(f"Processed data shape: {df_clean.shape}")
@@ -50,7 +50,7 @@ def main():
     print("\n💾 Saving model...")
     model_trainer.save_model()
     
-    # Generate sample predictions
+    # Generating sample predictions
     print("\n🔮 Generating sample predictions...")
     sample_predictions = model_trainer.predict_future(df_clean, features, future_days=7)
     
