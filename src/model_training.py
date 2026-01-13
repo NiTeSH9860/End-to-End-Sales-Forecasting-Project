@@ -29,13 +29,13 @@ class SalesForecastModel:
     
     def setup_mlflow(self):
         """Setup MLflow tracking"""
-        # Create local MLflow tracking directory
+        # Creating local MLflow tracking directory
         os.makedirs("mlflow", exist_ok=True)
         
-        # Set tracking URI first
+        # Setting tracking URI first
         mlflow.set_tracking_uri("file:///mlflow")
         
-        # Check if experiment exists, create if not
+        # Checking if experiment exists, create if not
         try:
             experiment = mlflow.get_experiment_by_name(self.experiment_name)
             if experiment is None:
@@ -45,7 +45,7 @@ class SalesForecastModel:
             print(f"📁 Creating new experiment: {self.experiment_name}")
             mlflow.create_experiment(self.experiment_name, artifact_location="mlflow")
         
-        # Set experiment
+        # Setting experiment
         mlflow.set_experiment(self.experiment_name)
         
         print("✅ MLflow setup completed")
@@ -97,20 +97,20 @@ class SalesForecastModel:
             mlflow.set_tag("problem_type", "time_series_forecast")
             mlflow.set_tag("framework", "xgboost")
             
-            # Train model - CORRECTED: eval_metric is in params, not fit()
+            # Training model 
             print("🤖 Training XGBoost model...")
             self.model = xgb.XGBRegressor(**params)
             self.model.fit(
                 X_train, y_train,
                 eval_set=[(X_test, y_test)],
-                verbose=100  # Only verbose here
+                verbose=100 
             )
             
         
-            # Make predictions
+            # Making predictions
             y_pred = self.model.predict(X_test)
             
-            # Calculate metrics
+            # Calculating metrics
             mae = mean_absolute_error(y_test, y_pred)
             mse = mean_squared_error(y_test, y_pred)
             rmse = np.sqrt(mse)
@@ -138,7 +138,7 @@ class SalesForecastModel:
                 'importance': self.model.feature_importances_
             }).sort_values('importance', ascending=False)
             
-            # Save feature importance as artifact
+            # Saving feature importance as artifact
             feature_importance.to_csv("feature_importance.csv", index=False)
             mlflow.log_artifact("feature_importance.csv")
             os.remove("feature_importance.csv")
@@ -208,21 +208,21 @@ class SalesForecastModel:
         if self.model is None:
             raise ValueError("Model not trained yet")
         
-        # Get last known data point
+        # Getting last known data point
         if len(df) == 0:
             raise ValueError("No data provided")
         
-        # Create a copy of the last row's features
+        # Creating a copy of the last row's features
         last_features = df[features].iloc[-1:].copy()
         
         predictions = []
         for i in range(future_days):
-            # Make prediction
+            # Making prediction
             pred = self.model.predict(last_features)[0]
             predictions.append(pred)
             
-            # Update the lag features for next prediction
-            # This is simplified - in production you'd need to update all lag features properly
+            # Updating the lag features for next prediction
+           
             if i < future_days - 1:
                 # Shift lag features
                 for col in features:
